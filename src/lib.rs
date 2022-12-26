@@ -1,15 +1,28 @@
-use std::io;
-use std::io::Error;
+mod receiver;
+mod sender;
+
+use std::collections::HashMap;
+use std::{fs, io, thread};
 use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 use aggligator::alc::Stream;
 use aggligator::cfg::Cfg;
+use aggligator::connect::{Incoming, Server};
+use aggligator::control::{Direction, Link};
+use aggligator::io::{IoRx, IoTx};
 use aggligator_util::net::{tcp_connect, tcp_server};
-use futures_util::{SinkExt, StreamExt};
+use aggligator_util::net::adv::{tcp_link_filter, tcp_listen, TcpLinkTag};
+use std::future::IntoFuture;
+use futures_util::{AsyncReadExt, SinkExt, StreamExt};
+use log::info;
 use prost::{DecodeError, Message};
-use tokio::io::AsyncReadExt;
+use tokio::fs::File;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
+use crate::error::SendfileError;
 use crate::sendfile_messages::MessageType;
 
 mod sendfile_messages {
@@ -40,96 +53,105 @@ mod sendfile_messages {
     }
 }
 
-struct FileSender {
-    client: Framed<Stream, LengthDelimitedCodec>
+pub mod error {
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum SendfileError {
+        InvalidMessageType,
+        FileAlreadyExists,
+        InvalidResponse,
+        ReadBytesError,
+        TimedOut,
+        MessageDecodeError,
+        RequestNotAccepted
+    }
 }
 
-struct FileReceiver {
-    destination_path: PathBuf,
-    port: u16
+struct TransferInfo {
+    file_handle: File,
+    next_chunk: u32,
+    num_chunks: u32
 }
 
-impl FileReceiver {
-    fn new(path: &Path, port: u16) -> Self {
-        FileReceiver{
-            destination_path: path.to_path_buf(),
-            port
+impl TransferInfo {
+    async fn new(root_folder: &Path, filename: &Path, num_chunks: u32) -> Result<Self, error::SendfileError> {
+        let file_path = root_folder.join(filename);
+        if file_path.exists() {
+            Err(SendfileError::FileAlreadyExists)
+        }else {
+            Ok(TransferInfo {
+                file_handle: File::create(root_folder.join(filename)).await.expect("Existence checked"),
+                next_chunk: 0,
+                num_chunks
+            })
         }
-    }
-
-    async fn serve(&self) -> io::Result<()> {
-        tcp_server(
-            Cfg::default(),
-            SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), self.port),
-            |stream: Stream| async move {
-                let (tx, mut rx) = Framed::new(stream, LengthDelimitedCodec::default()).split();
-
-                loop {
-                    match rx.next().await {
-                        None => println!("No data"),
-                        Some(m) => {
-                            match m {
-                                Ok(b) => {
-                                    match MessageType::from_id(b[0]).unwrap() {
-                                        MessageType::Ack => println!("Ack: {:?}", &b[1..]),
-                                        MessageType::FileTransferStart => {
-                                            let file_transfer_info: Result<sendfile_messages::FileTransferStart, DecodeError> = sendfile_messages::FileTransferStart::decode(&b[1..]);
-                                            println!("Transfer start: {:?}", file_transfer_info);
-                                        },
-                                        MessageType::FileTransferPart => println!("Filepart: {:?}", &b[1..])
-                                    }
-                                }
-                                Err(e) => println!("Error: {:?}", e)
-                            }
-                        }
-                    }
-                }
-            }
-        ).await
-    }
-}
-
-impl FileSender {
-    async fn connect(targets: Vec<String>, port: u16) -> io::Result<Self> {
-        Ok(FileSender{
-            client: Framed::new(tcp_connect(Cfg::default(), targets, port).await?, LengthDelimitedCodec::default())
-        })
-    }
-
-    async fn send_file(&mut self, file_path: &Path) -> Result<(), Error> {
-        let message = sendfile_messages::FileTransferStart{
-            file_name: String::from(file_path.file_name().unwrap().to_str().unwrap()),
-            num_chunks: 1234
-        };
-        self.client.send(vec![sendfile_messages::MessageType::FileTransferStart as u8].into_iter().chain(message.encode_to_vec().into_iter()).collect::<Vec<u8>>().into()).await
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::env::temp_dir;
+    use std::fmt;
+    use std::io::{Error, ErrorKind};
+    use std::sync::Once;
+    use serial_test::serial;
     use std::time::Duration;
+    use log::LevelFilter;
 
     use rand::{Rng, thread_rng};
     use rand::distributions::Alphanumeric;
     use tempdir::TempDir;
+    use crate::receiver::FileReceiver;
+    use crate::sender::FileSender;
 
     use super::*;
 
     const PORT: u16 = 21222;
+    static INIT: Once = Once::new();
+    fn setup_logger() {
+        INIT.call_once(
+        ||{env_logger::builder().filter_level(LevelFilter::Info).init()}
+        );
+    }
 
+    #[serial]
     #[tokio::test]
     async fn test_connect() {
+        setup_logger();
+
         let test_folder = TempDir::new(
             &thread_rng().sample_iter(&Alphanumeric).take(10).map(char::from).collect::<String>()
         ).unwrap().path().to_path_buf();
-        let server = FileReceiver::new(&test_folder, PORT);
+        let server = FileReceiver::new(&test_folder, PORT, ||true);
 
-        tokio::spawn(async move {server.serve().await});
+        tokio::spawn(async move {server.serve(tempdir::TempDir::new("test").unwrap().into_path()).await});
 
-        let mut client = FileSender::connect(vec!["localhost:21222".to_string()], PORT).await.unwrap();
+        let mut client = FileSender::connect(vec!["localhost:21222".to_string()], PORT, Cfg::default()).await.unwrap();
 
-        client.send_file(&PathBuf::from("/file.txt")).await.unwrap();
+        assert!(matches!(client.send_file(&PathBuf::from("/file.txt")).await, Ok(())));
 
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn test_connection_reject() {
+        setup_logger();
+
+        let test_folder = TempDir::new(
+            &thread_rng().sample_iter(&Alphanumeric).take(10).map(char::from).collect::<String>()
+        ).unwrap().path().to_path_buf();
+        let server = FileReceiver::new(&test_folder, PORT, ||false);
+
+        tokio::spawn(async move {server.serve(tempdir::TempDir::new("test").unwrap().into_path()).await});
+
+        let mut cfg = Cfg::default();
+        cfg.link_non_working_timeout = Duration::from_millis(20);
+        cfg.link_ack_timeout_max = Duration::from_millis(20);
+        cfg.no_link_timeout = Duration::from_millis(20);
+
+        let mut client_result = FileSender::connect(vec!["localhost:21222".to_string()], PORT, cfg).await;
+        let expected = Error::new(ErrorKind::TimedOut, "connect timeout");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert!(matches!(client_result.unwrap_err(), expected));
     }
 }

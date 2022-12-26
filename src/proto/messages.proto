@@ -13,8 +13,12 @@ message FileTransferStart {
 
 message FileTransferPart {
   required uint32 chunkIndex = 1;
-  required bytes content = 2;
-  required uint32 checksum = 3;
+  required string fileName = 2;
+  required bytes content = 3;
+  required uint32 checksum = 4;
 }
 
-message Ack {}
+message Ack {
+  required bool ok = 1;
+  optional string reason = 2;
+}

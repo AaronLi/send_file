@@ -5,21 +5,23 @@ use aggligator_util::net::tcp_connect;
 use aggligator::cfg::Cfg;
 use std::path::Path;
 use std::time::Duration;
+use prost::Message;
 use futures_util::{SinkExt, StreamExt};
-use crate::{MessageType, SendfileError};
+use crate::{MessageType, sendfile_messages, SendfileError};
 
+#[derive(Debug)]
 pub struct FileSender {
     client: Framed<Stream, LengthDelimitedCodec>
 }
 
 impl FileSender {
-    async fn connect(targets: Vec<String>, port: u16) -> io::Result<Self> {
+    pub async fn connect(targets: Vec<String>, port: u16, cfg: Cfg) -> io::Result<Self> {
         Ok(FileSender{
-            client: Framed::new(tcp_connect(Cfg::default(), targets, port).await?, LengthDelimitedCodec::default())
+            client: Framed::new(tcp_connect(cfg, targets, port).await?, LengthDelimitedCodec::default())
         })
     }
 
-    async fn send_file(&mut self, file_path: &Path) -> Result<(), SendfileError> {
+    pub async fn send_file(&mut self, file_path: &Path) -> Result<(), SendfileError> {
         let message = sendfile_messages::FileTransferStart{
             file_name: String::from(file_path.file_name().unwrap().to_str().unwrap()),
             num_chunks: 1234
