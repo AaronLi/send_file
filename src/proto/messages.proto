@@ -1,0 +1,20 @@
+syntax = "proto2";
+package sendfile_messages;
+
+service SendFile {
+  rpc InitializeTransfer(FileTransferStart) returns(Ack){}
+  rpc TransferFilePart(FileTransferPart) returns(Ack){}
+}
+
+message FileTransferStart {
+  required uint32 numChunks = 1;
+  required string fileName = 2;
+}
+
+message FileTransferPart {
+  required uint32 chunkIndex = 1;
+  required bytes content = 2;
+  required uint32 checksum = 3;
+}
+
+message Ack {}
