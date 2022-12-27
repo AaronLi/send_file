@@ -15,7 +15,7 @@ use std::sync::Arc;
 use adler::adler32_slice;
 use debug_ignore::DebugIgnore;
 use futures_util::{SinkExt, StreamExt};
-use log::info;
+use log::{debug, info};
 use prost::DecodeError;
 use tokio_util::codec::Framed;
 use tokio_util::codec::length_delimited::LengthDelimitedCodec;
@@ -112,23 +112,28 @@ impl FileReceiver {
                                                                         let csum = adler32_slice(&part.content);
                                                                         if csum != part.checksum {
                                                                             tx.send(
-                                                                                iter::once(sendfile_messages::MessageType::AckFileTransferPart.to_id()).chain(sendfile_messages::AckFilePart{chunk_index: Some(0), file_name: part.file_name}.encode_to_vec()).collect::<Vec<u8>>().into()
+                                                                                iter::once(sendfile_messages::MessageType::AckFilePart.to_id()).chain(sendfile_messages::AckFilePart{chunk_index: Some(0), file_name: part.file_name}.encode_to_vec()).collect::<Vec<u8>>().into()
                                                                             ).await;
                                                                             continue
                                                                         }
-                                                                        info.file_handle.seek(SeekFrom::Start(CHUNK_SIZE as u64 * part.chunk_index as u64));
-                                                                        info.file_handle.write(&part.content);
+                                                                        info!("Received chunk {} from client", part.chunk_index);
+                                                                        info.file_handle.seek(SeekFrom::Start(CHUNK_SIZE as u64 * part.chunk_index as u64)).await;
+                                                                        info.file_handle.write(&part.content).await;
                                                                         let remaining_files = (0..info.num_chunks).into_iter().filter(|c|*c!=part.chunk_index).collect::<Vec<u32>>();
                                                                         tx.send(
-                                                                          iter::once(sendfile_messages::MessageType::AckFileTransferPart.to_id()).chain(sendfile_messages::AckFilePart{chunk_index: remaining_files.get(0).cloned(), file_name: part.file_name.clone()}.encode_to_vec()).collect::<Vec<u8>>().into()
+                                                                          iter::once(sendfile_messages::MessageType::AckFilePart.to_id()).chain(sendfile_messages::AckFilePart{chunk_index: remaining_files.get(0).cloned(), file_name: part.file_name.clone()}.encode_to_vec()).collect::<Vec<u8>>().into()
                                                                         ).await.unwrap();
-                                                                        info.transfer_state = TransferState::InProgress(remaining_files);
+                                                                        info.transfer_state = if remaining_files.len() == 0 {
+                                                                            TransferState::Finished
+                                                                        }else{
+                                                                            TransferState::InProgress(remaining_files)
+                                                                        };
                                                                     }
                                                                     TransferState::InProgress(remaining) => {
                                                                         let csum = adler32_slice(&part.content);
                                                                         if csum != part.checksum {
                                                                             tx.send(
-                                                                                iter::once(sendfile_messages::MessageType::AckFileTransferPart.to_id()).chain(sendfile_messages::AckFilePart{chunk_index: remaining.get(0).cloned(), file_name: part.file_name.clone()}.encode_to_vec()).collect::<Vec<u8>>().into()
+                                                                                iter::once(sendfile_messages::MessageType::AckFilePart.to_id()).chain(sendfile_messages::AckFilePart{chunk_index: remaining.get(0).cloned(), file_name: part.file_name.clone()}.encode_to_vec()).collect::<Vec<u8>>().into()
                                                                             ).await.unwrap();
                                                                             continue
                                                                         }
@@ -153,13 +158,22 @@ impl FileReceiver {
                                                 }
                                                 println!("Filepart: {:?}", &b[1..])
                                             }
-                                            MessageType::AckFileTransferPart => println!("Received Ack File Part: {:?}", &b[1..]) // shouldn't occur on receiver side
+                                            MessageType::AckFilePart => println!("Received Ack File Part: {:?}", &b[1..]) // shouldn't occur on receiver side
                                         }
                                     }
                                     Err(e) => println!("Error: {:?}", e)
                                 }
                             }
                         }
+
+                        // clean finished file transfers
+                        file_transfers.lock().await.retain(|k, v|{
+                            let incomplete = !matches!(v.transfer_state, TransferState::Finished);
+                            if !incomplete {
+                                info!("File {} finished", k);
+                            }
+                            incomplete
+                        });
                     }
                 });
             }

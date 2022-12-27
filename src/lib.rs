@@ -1,3 +1,5 @@
+#![feature(int_roundings)]
+
 use std::path::{Path, PathBuf};
 
 use tokio::fs::File;
@@ -15,7 +17,7 @@ mod sendfile_messages {
         Ack,
         FileTransferStart,
         FileTransferPart,
-        AckFileTransferPart
+        AckFilePart
     }
     impl MessageType {
         pub(crate) fn to_id(&self) -> u8 {
@@ -23,7 +25,7 @@ mod sendfile_messages {
                 MessageType::Ack => 0,
                 MessageType::FileTransferStart => 1,
                 MessageType::FileTransferPart => 2,
-                MessageType::AckFileTransferPart => 3
+                MessageType::AckFilePart => 3
             }
         }
 
@@ -32,7 +34,7 @@ mod sendfile_messages {
                 0 => Some(MessageType::Ack),
                 1 => Some(MessageType::FileTransferStart),
                 2 => Some(MessageType::FileTransferPart),
-                3 => Some(MessageType::AckFileTransferPart),
+                3 => Some(MessageType::AckFilePart),
                 _ => None
             }
         }
@@ -48,7 +50,9 @@ pub mod error {
         ReadBytesError,
         TimedOut,
         MessageDecodeError,
-        RequestNotAccepted
+        RequestNotAccepted,
+        FileDoesNotExist,
+        NotAFile
     }
 }
 
@@ -87,12 +91,15 @@ mod tests {
     use std::sync::Once;
     use std::time::Duration;
     use aggligator::cfg::Cfg;
+    use futures_util::io::Cursor;
 
     use log::LevelFilter;
     use rand::{Rng, thread_rng};
     use rand::distributions::Alphanumeric;
     use serial_test::serial;
     use tempdir::TempDir;
+    use tokio::fs;
+    use tokio::io::AsyncReadExt;
 
     use crate::receiver::FileReceiver;
     use crate::sender::FileSender;
@@ -100,10 +107,11 @@ mod tests {
     use super::*;
 
     const PORT: u16 = 21222;
+    static FAKE_FILE: &'static [u8] = "Hello, world!".as_bytes();
     static INIT: Once = Once::new();
     fn setup_logger() {
         INIT.call_once(
-        ||{env_logger::builder().filter_level(LevelFilter::Info).init()}
+        ||{env_logger::builder().filter_level(LevelFilter::Debug).init()}
         );
     }
 
@@ -116,14 +124,21 @@ mod tests {
             &thread_rng().sample_iter(&Alphanumeric).take(10).map(char::from).collect::<String>()
         ).unwrap().path().to_path_buf();
         let server = FileReceiver::new(&test_folder, PORT, ||true);
-
-        tokio::spawn(async move {server.serve(tempdir::TempDir::new("test").unwrap().into_path()).await});
+        let test_dir = tempdir::TempDir::new("test").unwrap().into_path();
+        let test_dir_clone = test_dir.clone();
+        tokio::spawn(async move {server.serve(test_dir_clone).await});
 
         let mut client = FileSender::connect(vec!["localhost:21222".to_string()], PORT, Cfg::default()).await.unwrap();
+        assert_eq!(client.send_file(Cursor::new(FAKE_FILE), FAKE_FILE.len() as u64, "test.txt").await, Ok(()));
 
-        assert!(matches!(client.send_file(&PathBuf::from("/file.txt")).await, Ok(())));
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        let new_file_dir = test_dir.join("test.txt");
+        assert!(new_file_dir.exists());
+        let mut test_file = fs::File::open(new_file_dir).await.unwrap();
+        let mut content = String::new();
+        let file_content = test_file.read_to_string(&mut content).await;
+        assert_eq!(content.as_bytes(), FAKE_FILE);
     }
 
     #[serial]
@@ -135,8 +150,8 @@ mod tests {
             &thread_rng().sample_iter(&Alphanumeric).take(10).map(char::from).collect::<String>()
         ).unwrap().path().to_path_buf();
         let server = FileReceiver::new(&test_folder, PORT, ||false);
-
-        tokio::spawn(async move {server.serve(tempdir::TempDir::new("test").unwrap().into_path()).await});
+        let test_dir = tempdir::TempDir::new("test").unwrap().into_path();
+        tokio::spawn(async move {server.serve(test_dir.clone()).await});
 
         let mut cfg = Cfg::default();
         cfg.link_non_working_timeout = Duration::from_millis(20);
