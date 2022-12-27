@@ -91,7 +91,7 @@ mod tests {
     use std::sync::Once;
     use std::time::Duration;
     use aggligator::cfg::Cfg;
-    use futures_util::io::Cursor;
+    use futures_util::io::{BufReader, Cursor};
 
     use log::LevelFilter;
     use rand::{Rng, thread_rng};
@@ -117,19 +117,16 @@ mod tests {
 
     #[serial]
     #[tokio::test]
-    async fn test_connect() {
+    async fn test_basic_usage() {
         setup_logger();
 
-        let test_folder = TempDir::new(
-            &thread_rng().sample_iter(&Alphanumeric).take(10).map(char::from).collect::<String>()
-        ).unwrap().path().to_path_buf();
-        let server = FileReceiver::new(&test_folder, PORT, ||true);
+        let server = FileReceiver::new(PORT, ||true);
         let test_dir = tempdir::TempDir::new("test").unwrap().into_path();
         let test_dir_clone = test_dir.clone();
         tokio::spawn(async move {server.serve(test_dir_clone).await});
 
         let mut client = FileSender::connect(vec!["localhost:21222".to_string()], PORT, Cfg::default()).await.unwrap();
-        assert_eq!(client.send_file(Cursor::new(FAKE_FILE), FAKE_FILE.len() as u64, "test.txt").await, Ok(()));
+        assert_eq!(client.send_file(std::io::Cursor::new(FAKE_FILE.to_vec()), FAKE_FILE.len() as u64, "test.txt").await, Ok(()));
 
         tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -146,10 +143,7 @@ mod tests {
     async fn test_connection_reject() {
         setup_logger();
 
-        let test_folder = TempDir::new(
-            &thread_rng().sample_iter(&Alphanumeric).take(10).map(char::from).collect::<String>()
-        ).unwrap().path().to_path_buf();
-        let server = FileReceiver::new(&test_folder, PORT, ||false);
+        let server = FileReceiver::new(PORT, ||false);
         let test_dir = tempdir::TempDir::new("test").unwrap().into_path();
         tokio::spawn(async move {server.serve(test_dir.clone()).await});
 
@@ -162,5 +156,29 @@ mod tests {
         let expected = Error::new(ErrorKind::TimedOut, "connect timeout");
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert!(matches!(client_result.unwrap_err(), expected));
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn test_large_transfer() {
+        setup_logger();
+        let server = FileReceiver::new(PORT, ||true);
+        let test_dir = tempdir::TempDir::new("test").unwrap().into_path();
+        let test_dir_clone = test_dir.clone();
+        tokio::spawn(async move {server.serve(test_dir_clone).await});
+
+        let mut client = FileSender::connect(vec!["localhost:21222".to_string()], PORT, Cfg::default()).await.unwrap();
+        let mut to_send = File::open("Cargo.lock").await.unwrap();
+        let file_size = to_send.metadata().await.unwrap().len();
+        assert_eq!(client.send_file(to_send, file_size, "test.txt").await, Ok(()));
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let new_file_dir = test_dir.join("test.txt");
+        assert!(new_file_dir.exists());
+        let mut test_file = fs::File::open(new_file_dir).await.unwrap();
+        let mut content = String::new();
+        let file_content = test_file.read_to_string(&mut content).await;
+        assert_eq!(content.as_bytes(), fs::read_to_string("Cargo.lock").await.unwrap().as_bytes());
     }
 }

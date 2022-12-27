@@ -7,8 +7,9 @@ use aggligator::cfg::Cfg;
 use std::path::Path;
 use std::time::Duration;
 use adler::adler32_slice;
+use futures_util::{SinkExt, StreamExt};
 use prost::Message;
-use futures_util::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, SinkExt, StreamExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 use crate::{MessageType, sendfile_messages, SendfileError};
 use crate::receiver::CHUNK_SIZE;
 

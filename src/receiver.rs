@@ -28,17 +28,15 @@ pub const CHUNK_SIZE: u32 = 1024;
 
 #[derive(Debug, Clone)]
 pub struct FileReceiver {
-    destination_path: PathBuf,
     port: u16,
     connection_verifier: DebugIgnore<Arc<dyn Fn() -> bool + Send + Sync + 'static>>,
     file_transfers: Arc<Mutex<HashMap<String, TransferInfo>>>
 }
 
 impl FileReceiver {
-    pub fn new<F>(path: &Path, port: u16, connection_verifier: F) -> Self
+    pub fn new<F>(port: u16, connection_verifier: F) -> Self
         where F: Fn() -> bool + Send + Sync + 'static {
         FileReceiver{
-            destination_path: path.to_path_buf(),
             port,
             connection_verifier: debug_ignore::DebugIgnore(Arc::new(connection_verifier)),
             file_transfers: Arc::new(Mutex::new(HashMap::new()))
@@ -121,27 +119,29 @@ impl FileReceiver {
                                                                         info.file_handle.write(&part.content).await;
                                                                         let remaining_files = (0..info.num_chunks).into_iter().filter(|c|*c!=part.chunk_index).collect::<Vec<u32>>();
                                                                         tx.send(
-                                                                          iter::once(sendfile_messages::MessageType::AckFilePart.to_id()).chain(sendfile_messages::AckFilePart{chunk_index: remaining_files.get(0).cloned(), file_name: part.file_name.clone()}.encode_to_vec()).collect::<Vec<u8>>().into()
+                                                                          iter::once(sendfile_messages::MessageType::AckFilePart.to_id()).chain(sendfile_messages::AckFilePart{chunk_index: remaining_files.first().cloned(), file_name: part.file_name.clone()}.encode_to_vec()).collect::<Vec<u8>>().into()
                                                                         ).await.unwrap();
                                                                         info.transfer_state = if remaining_files.len() == 0 {
                                                                             TransferState::Finished
                                                                         }else{
                                                                             TransferState::InProgress(remaining_files)
                                                                         };
+                                                                        info!("{:?}", info.transfer_state);
                                                                     }
                                                                     TransferState::InProgress(remaining) => {
                                                                         let csum = adler32_slice(&part.content);
                                                                         if csum != part.checksum {
                                                                             tx.send(
-                                                                                iter::once(sendfile_messages::MessageType::AckFilePart.to_id()).chain(sendfile_messages::AckFilePart{chunk_index: remaining.get(0).cloned(), file_name: part.file_name.clone()}.encode_to_vec()).collect::<Vec<u8>>().into()
+                                                                                iter::once(sendfile_messages::MessageType::AckFilePart.to_id()).chain(sendfile_messages::AckFilePart{chunk_index: remaining.first().cloned(), file_name: part.file_name.clone()}.encode_to_vec()).collect::<Vec<u8>>().into()
                                                                             ).await.unwrap();
                                                                             continue
                                                                         }
+                                                                        info!("Received chunk {} from client", part.chunk_index);
                                                                         info.file_handle.seek(SeekFrom::Start(CHUNK_SIZE as u64 * part.chunk_index as u64)).await;
                                                                         info.file_handle.write(&part.content).await;
                                                                         remaining.retain(|c|*c!=part.chunk_index);
                                                                         tx.send(
-                                                                            iter::once(sendfile_messages::MessageType::Ack.to_id()).chain(sendfile_messages::Ack{ok: true, reason: None}.encode_to_vec()).collect::<Vec<u8>>().into()
+                                                                            iter::once(sendfile_messages::MessageType::AckFilePart.to_id()).chain(sendfile_messages::AckFilePart{chunk_index: remaining.first().cloned(), file_name: part.file_name.clone()}.encode_to_vec()).collect::<Vec<u8>>().into()
                                                                         ).await.unwrap();
 
                                                                         if remaining.len() == 0 {
@@ -156,7 +156,6 @@ impl FileReceiver {
                                                     },
                                                     Err(_) => println!("Failed to parse transfer part")
                                                 }
-                                                println!("Filepart: {:?}", &b[1..])
                                             }
                                             MessageType::AckFilePart => println!("Received Ack File Part: {:?}", &b[1..]) // shouldn't occur on receiver side
                                         }
