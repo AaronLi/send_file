@@ -133,6 +133,7 @@ mod tests {
         let mut content = String::new();
         let _file_content = test_file.read_to_string(&mut content).await.unwrap();
         assert_eq!(content.as_bytes(), FAKE_FILE);
+        client.disconnect();
     }
 
     #[serial]
@@ -153,6 +154,7 @@ mod tests {
         let expected = Error::new(ErrorKind::TimedOut, "connect timeout");
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert!(matches!(client_result.unwrap_err(), expected));
+        client.disconnect();
     }
 
     #[serial]
@@ -177,5 +179,6 @@ mod tests {
         let mut content = String::new();
         let _bytes_read = test_file.read_to_string(&mut content).await;
         assert_eq!(content.as_bytes(), fs::read_to_string("Cargo.lock").await.unwrap().as_bytes());
+        client.disconnect();
     }
 }
