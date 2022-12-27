@@ -15,6 +15,8 @@ prost = "0.11.3"
 log = "0.4.17"
 env_logger = "0.10.0"
 debug-ignore = "1.0.3"
+adler = "1.0.2"
+itertools = "0.10.5"
 
 [build-dependencies]
 prost-build = "0.11.4"

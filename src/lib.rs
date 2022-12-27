@@ -1,29 +1,12 @@
-mod receiver;
-mod sender;
-
-use std::collections::HashMap;
-use std::{fs, io, thread};
-use std::net::Ipv4Addr;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
-use aggligator::alc::Stream;
-use aggligator::cfg::Cfg;
-use aggligator::connect::{Incoming, Server};
-use aggligator::control::{Direction, Link};
-use aggligator::io::{IoRx, IoTx};
-use aggligator_util::net::{tcp_connect, tcp_server};
-use aggligator_util::net::adv::{tcp_link_filter, tcp_listen, TcpLinkTag};
-use std::future::IntoFuture;
-use futures_util::{AsyncReadExt, SinkExt, StreamExt};
-use log::info;
-use prost::{DecodeError, Message};
+
 use tokio::fs::File;
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_util::codec::{Framed, LengthDelimitedCodec};
+
 use crate::error::SendfileError;
 use crate::sendfile_messages::MessageType;
+
+mod receiver;
+mod sender;
 
 mod sendfile_messages {
     include!(concat!(env!("OUT_DIR"), "/sendfile_messages.rs"));
@@ -32,13 +15,15 @@ mod sendfile_messages {
         Ack,
         FileTransferStart,
         FileTransferPart,
+        AckFileTransferPart
     }
     impl MessageType {
         pub(crate) fn to_id(&self) -> u8 {
             match self {
                 MessageType::Ack => 0,
                 MessageType::FileTransferStart => 1,
-                MessageType::FileTransferPart => 2
+                MessageType::FileTransferPart => 2,
+                MessageType::AckFileTransferPart => 3
             }
         }
 
@@ -47,6 +32,7 @@ mod sendfile_messages {
                 0 => Some(MessageType::Ack),
                 1 => Some(MessageType::FileTransferStart),
                 2 => Some(MessageType::FileTransferPart),
+                3 => Some(MessageType::AckFileTransferPart),
                 _ => None
             }
         }
@@ -66,10 +52,18 @@ pub mod error {
     }
 }
 
+#[derive(Debug)]
+enum TransferState {
+    Accepted,
+    InProgress(Vec<u32>),
+    Finished
+}
+
+#[derive(Debug)]
 struct TransferInfo {
     file_handle: File,
-    next_chunk: u32,
-    num_chunks: u32
+    num_chunks: u32,
+    transfer_state: TransferState
 }
 
 impl TransferInfo {
@@ -80,8 +74,8 @@ impl TransferInfo {
         }else {
             Ok(TransferInfo {
                 file_handle: File::create(root_folder.join(filename)).await.expect("Existence checked"),
-                next_chunk: 0,
-                num_chunks
+                num_chunks,
+                transfer_state: TransferState::Accepted
             })
         }
     }
@@ -89,17 +83,17 @@ impl TransferInfo {
 
 #[cfg(test)]
 mod tests {
-    use std::env::temp_dir;
-    use std::fmt;
     use std::io::{Error, ErrorKind};
     use std::sync::Once;
-    use serial_test::serial;
     use std::time::Duration;
-    use log::LevelFilter;
+    use aggligator::cfg::Cfg;
 
+    use log::LevelFilter;
     use rand::{Rng, thread_rng};
     use rand::distributions::Alphanumeric;
+    use serial_test::serial;
     use tempdir::TempDir;
+
     use crate::receiver::FileReceiver;
     use crate::sender::FileSender;
 

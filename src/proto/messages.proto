@@ -22,3 +22,8 @@ message Ack {
   required bool ok = 1;
   optional string reason = 2;
 }
+
+message AckFilePart{
+  optional uint32 chunkIndex = 1;
+  required string fileName = 3;
+}

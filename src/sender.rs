@@ -49,12 +49,13 @@ impl FileSender {
                                 }
 
                             },
-                            MessageType::FileTransferStart | MessageType::FileTransferPart => Err(SendfileError::InvalidResponse)
+                            MessageType::FileTransferStart | MessageType::FileTransferPart | MessageType::AckFileTransferPart => Err(SendfileError::InvalidResponse)
                         }
                     }
                 }
             }
         }?;
+        // File transfer accepted, begin transferring data
 
         Ok(())
     }
