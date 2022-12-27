@@ -5,23 +5,24 @@ use core::marker::{Send, Sync};
 use core::option::Option::{None, Some};
 use core::result::Result;
 use core::result::Result::{Err, Ok};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::{fs, io, iter};
 use std::future::IntoFuture;
 use std::io::SeekFrom;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::{PathBuf};
 use std::sync::Arc;
 use adler::adler32_slice;
 use debug_ignore::DebugIgnore;
 use futures_util::{SinkExt, StreamExt};
-use log::{debug, info};
+use log::{info};
 use prost::DecodeError;
 use tokio_util::codec::Framed;
 use tokio_util::codec::length_delimited::LengthDelimitedCodec;
 use prost::Message;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 use crate::{MessageType, sendfile_messages, TransferInfo, TransferState};
 
 pub const CHUNK_SIZE: u32 = 1024;
@@ -30,7 +31,14 @@ pub const CHUNK_SIZE: u32 = 1024;
 pub struct FileReceiver {
     port: u16,
     connection_verifier: DebugIgnore<Arc<dyn Fn() -> bool + Send + Sync + 'static>>,
-    file_transfers: Arc<Mutex<HashMap<String, TransferInfo>>>
+    file_transfers: Arc<Mutex<HashMap<String, TransferInfo>>>,
+    chunk_history: Arc<Mutex<VecDeque<ChunkSummary>>>
+}
+
+#[derive(Debug, Clone)]
+struct ChunkSummary {
+    size: u32,
+    timestamp: Instant
 }
 
 impl FileReceiver {
@@ -39,31 +47,63 @@ impl FileReceiver {
         FileReceiver{
             port,
             connection_verifier: debug_ignore::DebugIgnore(Arc::new(connection_verifier)),
-            file_transfers: Arc::new(Mutex::new(HashMap::new()))
+            file_transfers: Arc::new(Mutex::new(HashMap::new())),
+            chunk_history: Arc::new(Mutex::new(VecDeque::new()))
         }
     }
 
+    async fn chunk_received(chunk_history: Arc<Mutex<VecDeque<ChunkSummary>>>, size: u32) {
+        let mut chunks = chunk_history.lock().await;
+        chunks.push_back(
+            ChunkSummary{
+                size,
+                timestamp: tokio::time::Instant::now()
+            }
+        );
+        while let Some(c) = chunks.front() {
+            if c.timestamp.elapsed().as_secs() > 10 {
+                chunks.pop_front();
+            }else{
+                break;
+            }
+        }
+    }
+
+    async fn files_open(&self) -> usize {
+        self.file_transfers.lock().await.len()
+    }
+
+    async fn bytes_per_second(chunk_history: Arc<Mutex<VecDeque<ChunkSummary>>>) -> f32 {
+        let chunk_history_locked = chunk_history.lock().await;
+        if chunk_history_locked.len() <= 1 {
+            return 0f32;
+        }
+        let elapsed = chunk_history_locked.front().expect("At least 2 elements").timestamp.elapsed().as_secs_f32() - chunk_history_locked.back().expect("At least 2 elements").timestamp.elapsed().as_secs_f32();
+        chunk_history_locked.iter().map(|c|c.size as f32).sum::<f32>() / elapsed
+    }
+
     pub async fn serve(self, root: PathBuf) -> io::Result<()> {
-        fs::create_dir_all(&root);
+        fs::create_dir_all(&root)?;
         let server = Server::new(Cfg::default());
         let mut listener = server.listen().await.unwrap();
         tokio::spawn(async move {
             loop {
-                let mut inc = listener.next().await.unwrap();
+                let inc = listener.next().await.unwrap();
                 info!("Received connection {:?}", inc.remote_server_id());
                 if !(self.connection_verifier)() {
                     inc.refuse().await;
                     info!("Connection refused");
                     continue
                 }
-                let (mut task, ch, mut control) = inc.accept().await;
+                let (mut task, ch, _control) = inc.accept().await;
                 let root = root.clone();
                 let file_transfers = Arc::clone(&self.file_transfers);
+                let chunk_history = Arc::clone(&self.chunk_history);
                 task.set_link_filter(tcp_link_filter);
 
                 tokio::spawn(task.into_future());
                 tokio::spawn(async move {
-                    let mut framed_channel = Framed::new(ch.into_stream(), LengthDelimitedCodec::default());
+                    let framed_channel = Framed::new(ch.into_stream(), LengthDelimitedCodec::default());
                     let (mut tx, mut rx) = framed_channel.split();
                     loop {
                         match rx.next().await {
@@ -109,12 +149,13 @@ impl FileReceiver {
                                                                     TransferState::Accepted => {
                                                                         let csum = adler32_slice(&part.content);
                                                                         if csum != part.checksum {
-                                                                            tx.send(
+                                                                            let _ = tx.send(
                                                                                 iter::once(sendfile_messages::MessageType::AckFilePart.to_id()).chain(sendfile_messages::AckFilePart{chunk_index: Some(0), file_name: part.file_name}.encode_to_vec()).collect::<Vec<u8>>().into()
                                                                             ).await;
                                                                             continue
                                                                         }
                                                                         info!("Received chunk {} from client", part.chunk_index);
+                                                                        Self::chunk_received(Arc::clone(&chunk_history), part.content.len() as u32).await;
                                                                         info.file_handle.seek(SeekFrom::Start(CHUNK_SIZE as u64 * part.chunk_index as u64)).await;
                                                                         info.file_handle.write(&part.content).await;
                                                                         let remaining_files = (0..info.num_chunks).into_iter().filter(|c|*c!=part.chunk_index).collect::<Vec<u32>>();
@@ -137,6 +178,7 @@ impl FileReceiver {
                                                                             continue
                                                                         }
                                                                         info!("Received chunk {} from client", part.chunk_index);
+                                                                        Self::chunk_received(Arc::clone(&chunk_history), part.content.len() as u32).await;
                                                                         info.file_handle.seek(SeekFrom::Start(CHUNK_SIZE as u64 * part.chunk_index as u64)).await;
                                                                         info.file_handle.write(&part.content).await;
                                                                         remaining.retain(|c|*c!=part.chunk_index);
@@ -173,6 +215,7 @@ impl FileReceiver {
                             }
                             incomplete
                         });
+                        info!("Speed: {}bps", Self::bytes_per_second(Arc::clone(&chunk_history)).await);
                     }
                 });
             }

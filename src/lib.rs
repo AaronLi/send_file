@@ -1,6 +1,6 @@
 #![feature(int_roundings)]
 
-use std::path::{Path, PathBuf};
+use std::path::{Path};
 
 use tokio::fs::File;
 
@@ -52,7 +52,8 @@ pub mod error {
         MessageDecodeError,
         RequestNotAccepted,
         FileDoesNotExist,
-        NotAFile
+        NotAFile,
+        FailedToCommunicateWithReceiver
     }
 }
 
@@ -91,11 +92,7 @@ mod tests {
     use std::sync::Once;
     use std::time::Duration;
     use aggligator::cfg::Cfg;
-    use futures_util::io::{BufReader, Cursor};
-
     use log::LevelFilter;
-    use rand::{Rng, thread_rng};
-    use rand::distributions::Alphanumeric;
     use serial_test::serial;
     use tempdir::TempDir;
     use tokio::fs;
@@ -121,7 +118,7 @@ mod tests {
         setup_logger();
 
         let server = FileReceiver::new(PORT, ||true);
-        let test_dir = tempdir::TempDir::new("test").unwrap().into_path();
+        let test_dir = TempDir::new("test").unwrap().into_path();
         let test_dir_clone = test_dir.clone();
         tokio::spawn(async move {server.serve(test_dir_clone).await});
 
@@ -134,7 +131,7 @@ mod tests {
         assert!(new_file_dir.exists());
         let mut test_file = fs::File::open(new_file_dir).await.unwrap();
         let mut content = String::new();
-        let file_content = test_file.read_to_string(&mut content).await;
+        let _file_content = test_file.read_to_string(&mut content).await.unwrap();
         assert_eq!(content.as_bytes(), FAKE_FILE);
     }
 
@@ -144,7 +141,7 @@ mod tests {
         setup_logger();
 
         let server = FileReceiver::new(PORT, ||false);
-        let test_dir = tempdir::TempDir::new("test").unwrap().into_path();
+        let test_dir = TempDir::new("test").unwrap().into_path();
         tokio::spawn(async move {server.serve(test_dir.clone()).await});
 
         let mut cfg = Cfg::default();
@@ -152,7 +149,7 @@ mod tests {
         cfg.link_ack_timeout_max = Duration::from_millis(20);
         cfg.no_link_timeout = Duration::from_millis(20);
 
-        let mut client_result = FileSender::connect(vec!["localhost:21222".to_string()], PORT, cfg).await;
+        let client_result = FileSender::connect(vec!["localhost:21222".to_string()], PORT, cfg).await;
         let expected = Error::new(ErrorKind::TimedOut, "connect timeout");
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert!(matches!(client_result.unwrap_err(), expected));
@@ -163,12 +160,12 @@ mod tests {
     async fn test_large_transfer() {
         setup_logger();
         let server = FileReceiver::new(PORT, ||true);
-        let test_dir = tempdir::TempDir::new("test").unwrap().into_path();
+        let test_dir = TempDir::new("test").unwrap().into_path();
         let test_dir_clone = test_dir.clone();
         tokio::spawn(async move {server.serve(test_dir_clone).await});
 
         let mut client = FileSender::connect(vec!["localhost:21222".to_string()], PORT, Cfg::default()).await.unwrap();
-        let mut to_send = File::open("Cargo.lock").await.unwrap();
+        let to_send = File::open("Cargo.lock").await.unwrap();
         let file_size = to_send.metadata().await.unwrap().len();
         assert_eq!(client.send_file(to_send, file_size, "test.txt").await, Ok(()));
 
@@ -178,7 +175,7 @@ mod tests {
         assert!(new_file_dir.exists());
         let mut test_file = fs::File::open(new_file_dir).await.unwrap();
         let mut content = String::new();
-        let file_content = test_file.read_to_string(&mut content).await;
+        let _bytes_read = test_file.read_to_string(&mut content).await;
         assert_eq!(content.as_bytes(), fs::read_to_string("Cargo.lock").await.unwrap().as_bytes());
     }
 }
