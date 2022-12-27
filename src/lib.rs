@@ -7,8 +7,8 @@ use tokio::fs::File;
 use crate::error::SendfileError;
 use crate::sendfile_messages::MessageType;
 
-mod receiver;
-mod sender;
+pub mod receiver;
+pub mod sender;
 
 mod sendfile_messages {
     include!(concat!(env!("OUT_DIR"), "/sendfile_messages.rs"));
