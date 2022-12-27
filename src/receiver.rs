@@ -107,7 +107,7 @@ impl FileReceiver {
                     let (mut tx, mut rx) = framed_channel.split();
                     loop {
                         match rx.next().await {
-                            None => println!("No data"),
+                            None => break,
                             Some(m) => {
                                 match m {
                                     Ok(b) => {

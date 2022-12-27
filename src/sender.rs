@@ -97,8 +97,4 @@ impl FileSender {
         }
         Ok(())
     }
-
-    pub fn disconnect(mut self){
-        self.client.into_inner().close();
-    }
 }
